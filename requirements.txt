@@ -1,6 +1,6 @@
 streamlit
 pandas
-speech_recognition
+SpeechRecognition
 openai
 google
 langchain
