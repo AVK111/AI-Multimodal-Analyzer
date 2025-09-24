@@ -1,0 +1,83 @@
+name: Deploy to AWS ECR with Nginx
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1   # change region if needed
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: my-app-repo   # change to your repo name
+          IMAGE_TAG: latest
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Update system
+            sudo apt-get update -y
+
+            # Install Docker if not installed
+            if ! command -v docker &> /dev/null
+            then
+              curl -fsSL https://get.docker.com -o get-docker.sh
+              sh get-docker.sh
+            fi
+
+            # Install Nginx
+            sudo apt-get install -y nginx
+            sudo systemctl enable nginx
+            sudo systemctl start nginx
+
+            # Configure Nginx reverse proxy
+            echo "server {
+                listen 80;
+                server_name _;
+                location / {
+                    proxy_pass http://127.0.0.1:5000;   # change if app runs on different port
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto \$scheme;
+                }
+            }" | sudo tee /etc/nginx/sites-available/app
+
+            sudo ln -sf /etc/nginx/sites-available/app /etc/nginx/sites-enabled/
+            sudo nginx -t
+            sudo systemctl restart nginx
+
+            # Pull latest image from ECR
+            aws ecr get-login-password --region ap-south-1 | sudo docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            sudo docker pull ${{ steps.login-ecr.outputs.registry }}/my-app-repo:latest
+
+            # Stop old container if running
+            sudo docker stop my-app || true
+            sudo docker rm my-app || true
+
+            # Run new container
+            sudo docker run -d --name my-app -p 5000:5000 ${{ steps.login-ecr.outputs.registry }}/my-app-repo:latest

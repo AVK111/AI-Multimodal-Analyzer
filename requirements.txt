@@ -1,0 +1,7 @@
+streamlit
+pandas
+speech_recognition
+openai
+google
+langchain
+chromadb
